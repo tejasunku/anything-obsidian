@@ -2,10 +2,12 @@ import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Set
 
 interface AnythingObsidianSettings {
 	apiKey: string;
+	rootUrl: string;
 }
 
 const DEFAULT_SETTINGS: AnythingObsidianSettings = {
-	apiKey: ''
+	apiKey: '',
+	rootUrl: 'http://localhost:3001'
 }
 
 export default class AnythingObsidian extends Plugin {
@@ -52,6 +54,20 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.apiKey)
 				.onChange(async (value) => {
 					this.plugin.settings.apiKey = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Anything LLM Root URL')
+			.setDesc('Enter your Anything LLM instance URL')
+			.addText(text => text
+				.setPlaceholder('http://localhost:3001')
+				.setValue(this.plugin.settings.rootUrl)
+				.onChange(async (value) => {
+					if (value.endsWith('/')) {
+						value = value.slice(0, -1);
+					}
+					this.plugin.settings.rootUrl = value;
 					await this.plugin.saveSettings();
 				}));
 	}
