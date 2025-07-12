@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFile } from 'obsidian';
 
 interface Workspace {
 	name: string;
@@ -12,6 +12,8 @@ interface AnythingObsidianSettings {
 	selectedWorkspaces: string[];
 	syncedFolders: string[];
 	autoDelete: boolean;
+	updateHandling: 'keep-in-workspace' | 'archive' | 'delete';
+	remoteBaseFolder: string;
 }
 
 const DEFAULT_SETTINGS: AnythingObsidianSettings = {
@@ -20,7 +22,9 @@ const DEFAULT_SETTINGS: AnythingObsidianSettings = {
 	workspaces: [],
 	selectedWorkspaces: [],
 	syncedFolders: [],
-	autoDelete: false
+	autoDelete: false,
+	updateHandling: 'archive',
+	remoteBaseFolder: 'Obsidian Vault'
 }
 
 export default class AnythingObsidian extends Plugin {
@@ -36,9 +40,8 @@ export default class AnythingObsidian extends Plugin {
 			id: 'sync-folders-to-anything-llm',
 			name: 'Sync folders to Anything LLM',
 			callback: async () => {
-				// Placeholder for the sync logic
 				new Notice('Sync process initiated...');
-				// We will implement the actual sync logic here in the next steps.
+				await this.syncFolders();
 			}
 		});
 
@@ -57,44 +60,360 @@ export default class AnythingObsidian extends Plugin {
 					new Notice('API Key or Root URL is missing. Please configure them in the settings.');
 					return;
 				}
-				
+
 				const file = view.file;
 				if (!file) {
 					new Notice('No active file to upload.');
 					return;
 				}
-
-				const fileContent = await this.app.vault.read(file);
-				
-				const formData = new FormData();
-				formData.append('file', new Blob([fileContent], { type: 'text/markdown' }), file.name);
-				formData.append('addToWorkspaces', selectedWorkspaces.join(','));
-
 				new Notice(`Uploading ${file.name}...`);
-
-				try {
-					// We need to use fetch directly as requestUrl does not support FormData well.
-					const response = await fetch(`${rootUrl}/api/v1/document/upload`, {
-						method: 'POST',
-						body: formData,
-						headers: {
-							'Authorization': `Bearer ${apiKey}`,
-						}
-					});
-					
-					const responseData = await response.json();
-
-					if (responseData.success) {
-						new Notice(`${file.name} uploaded successfully to ${selectedWorkspaces.length} workspace(s).`);
-					} else {
-						new Notice(`Failed to upload ${file.name}. Error: ${responseData.error}`);
-					}
-				} catch (e: any) {
-					new Notice(`Error uploading file: ${e.message}`);
-					console.error(e);
-				}
+				await this.uploadFile(file, selectedWorkspaces);
 			}
 		});
+	}
+
+	async syncFolders() {
+		const { apiKey, rootUrl, syncedFolders, remoteBaseFolder } = this.settings;
+		if (!syncedFolders || syncedFolders.length === 0) {
+			new Notice('No folders configured for syncing.');
+			return;
+		}
+
+		await this.ensureRemoteFolderExists(remoteBaseFolder);
+
+		new Notice('Fetching remote file list...');
+		const remoteFiles = await this.getRemoteFileList();
+		if (remoteFiles === null) {
+			new Notice('Failed to fetch remote files. Aborting sync.');
+			return;
+		}
+
+		new Notice('Scanning local files...');
+		const localFiles = await this.getLocalFiles(syncedFolders);
+		
+		const { toCreate, toUpdate, toDelete } = this.compareFiles(localFiles, remoteFiles);
+
+		console.log('Files to create:', toCreate);
+		console.log('Files to update:', toUpdate);
+		console.log('Files to delete:', toDelete);
+
+		new Notice('Sync comparison complete. Check console for details.');
+
+		// Now, perform the actual file operations
+		await this.processCreations(toCreate, localFiles);
+		await this.processUpdates(toUpdate, localFiles, remoteFiles);
+		await this.processDeletions(toDelete, remoteFiles);
+	}
+
+	async processCreations(toCreate: Set<string>, localFiles: Map<string, any>) {
+		for (const path of toCreate) {
+			const file = this.app.vault.getAbstractFileByPath(localFiles.get(path).path);
+			if (file instanceof TFile) {
+				new Notice(`Creating: ${file.name}`);
+				await this.uploadFile(file, this.settings.selectedWorkspaces);
+			}
+		}
+	}
+
+	async processUpdates(toUpdate: Set<string>, localFiles: Map<string, any>, remoteFiles: Map<string, any>) {
+		const { updateHandling } = this.settings;
+		if (toUpdate.size === 0) return;
+
+		const filesToUpload: TFile[] = [];
+		const remotePathsToModify: string[] = [];
+		for (const key of toUpdate) {
+			const localFile = localFiles.get(key);
+			const remoteFile = remoteFiles.get(key);
+			if (!localFile || !remoteFile) continue;
+
+			filesToUpload.push(this.app.vault.getAbstractFileByPath(localFile.path) as TFile);
+			remotePathsToModify.push(`${this.settings.remoteBaseFolder}/${remoteFile.name}`);
+		}
+		
+		new Notice(`Found ${filesToUpload.length} file(s) to update.`);
+
+		// Always upload the new version first
+		for (const file of filesToUpload) {
+			await this.uploadFile(file, this.settings.selectedWorkspaces);
+		}
+
+		// Now, handle the old version based on the setting
+		if (updateHandling === 'keep-in-workspace') {
+			// Do nothing. The old file is kept and its embeddings remain.
+			new Notice('Kept old versions in workspace.');
+			return;
+		}
+
+		// For both 'archive' and 'delete', we need to remove the old embeddings
+		for (const slug of this.settings.selectedWorkspaces) {
+			await this.removeDocumentsFromWorkspace(slug, remotePathsToModify);
+		}
+
+		if (updateHandling === 'archive') {
+			// Move the old files to an archive folder
+			await this.moveFilesToArchive(remotePathsToModify);
+		}
+
+		if (updateHandling === 'delete') {
+			// Move the old files to the trash folder, which will be deleted if auto-delete is on
+			await this.moveFilesToTrash(remotePathsToModify);
+		}
+	}
+
+	async uploadFile(file: TFile, workspaces: string[]) {
+		const { apiKey, rootUrl, remoteBaseFolder } = this.settings;
+		
+		await this.ensureRemoteFolderExists(remoteBaseFolder);
+		
+		const fileContent = await this.app.vault.read(file);
+		const mangledName = this.getMangledFileName(file);
+		
+		const formData = new FormData();
+		formData.append('file', new Blob([fileContent], { type: 'text/markdown' }), mangledName);
+
+		try {
+			const response = await fetch(`${rootUrl}/api/v1/document/upload/${encodeURIComponent(remoteBaseFolder)}`, {
+				method: 'POST',
+				body: formData,
+				headers: { 'Authorization': `Bearer ${apiKey}` }
+			});
+			
+			const responseData = await response.json();
+			if (!response.ok || !responseData.success) {
+				const errorMessage = responseData.error || `HTTP error! Status: ${response.status}`;
+				new Notice(`Failed to upload ${file.name}: ${errorMessage}`);
+				return; // Stop if upload failed
+			}
+
+			// If upload is successful, add to workspaces
+			const newDocumentName = responseData.documents[0].name;
+			const documentPath = `${remoteBaseFolder}/${newDocumentName}`;
+			for (const slug of workspaces) {
+				await this.addDocumentToWorkspace(slug, documentPath);
+			}
+
+		} catch (e: any) {
+			new Notice(`Failed to upload ${file.name}.`);
+		}
+	}
+
+	async addDocumentToWorkspace(slug: string, documentPath: string) {
+		const { apiKey, rootUrl } = this.settings;
+		try {
+			await requestUrl({
+				url: `${rootUrl}/api/v1/workspace/${slug}/update-embeddings`,
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${apiKey}`
+				},
+				body: JSON.stringify({
+					adds: [documentPath]
+				})
+			});
+		} catch (e: any) {
+			console.error(`Failed to add ${documentPath} to workspace ${slug}:`, e);
+			new Notice(`Failed to add document to workspace ${slug}.`);
+		}
+	}
+
+	async moveFilesToTrash(remotePaths: string[]) {
+		await this.moveFilesToFolder(remotePaths, '_trash');
+	}
+	
+	async moveFilesToArchive(remotePaths: string[]) {
+		await this.moveFilesToFolder(remotePaths, '_archive');
+	}
+	
+	async moveFilesToFolder(remotePaths: string[], targetFolder: string) {
+		if (remotePaths.length === 0) return;
+		const { apiKey, rootUrl } = this.settings;
+	
+		const filesToMove = remotePaths.map(path => ({
+			from: path,
+			to: `${targetFolder}/${path.split('/').pop()}`
+		}));
+	
+		try {
+			await this.ensureRemoteFolderExists(targetFolder);
+			await fetch(`${rootUrl}/api/v1/document/move-files`, {
+				method: 'POST',
+				body: JSON.stringify({ files: filesToMove }),
+				headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+			});
+			new Notice(`Moved ${remotePaths.length} file(s) to the ${targetFolder} folder.`);
+		} catch (e: any) {
+			console.error(`Error moving files to ${targetFolder}:`, e);
+			new Notice(`Failed to move files to ${targetFolder}.`);
+		}
+	}
+	
+	async processDeletions(toDelete: Set<string>, remoteFiles: Map<string, any>) {
+		if (toDelete.size === 0) return;
+	
+		const remotePathsToDelete: string[] = [];
+		const { remoteBaseFolder } = this.settings;
+	
+		for (const key of toDelete) {
+			const remoteFile = remoteFiles.get(key);
+			if (!remoteFile) continue;
+			const remotePath = `${remoteBaseFolder}/${remoteFile.name}`;
+			remotePathsToDelete.push(remotePath);
+		}
+		
+		new Notice(`Found ${remotePathsToDelete.length} file(s) to delete.`);
+		for (const slug of this.settings.selectedWorkspaces) {
+			await this.removeDocumentsFromWorkspace(slug, remotePathsToDelete);
+		}
+	
+		await this.moveFilesToTrash(remotePathsToDelete);
+
+		if (this.settings.autoDelete) {
+			await this.clearRemoteArchives();
+		}
+	}
+
+	async removeDocumentsFromWorkspace(slug: string, documentPaths: string[]) {
+		if (documentPaths.length === 0) return;
+		const { apiKey, rootUrl } = this.settings;
+		try {
+			await requestUrl({
+				url: `${rootUrl}/api/v1/workspace/${slug}/update-embeddings`,
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${apiKey}`
+				},
+				body: JSON.stringify({
+					deletes: documentPaths
+				})
+			});
+		} catch (e: any) {
+			console.error(`Failed to remove documents from workspace ${slug}:`, e);
+			new Notice(`Failed to remove documents from workspace ${slug}.`);
+		}
+	}
+
+	async clearRemoteArchives() {
+		const { apiKey, rootUrl } = this.settings;
+		const foldersToClear = ['_trash', '_archive'];
+		for (const folderName of foldersToClear) {
+			try {
+				await fetch(`${rootUrl}/api/v1/document/remove-folder`, {
+					method: 'DELETE',
+					body: JSON.stringify({ name: folderName }),
+					headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+				});
+				new Notice(`Cleared the ${folderName} folder.`);
+			} catch (e: any) {
+				// It's okay if the folder doesn't exist, so we only log other errors.
+				if (e.message && !e.message.includes('404')) {
+					console.error(`Error clearing ${folderName} folder:`, e);
+				}
+			}
+		}
+	}
+
+	getMangledFileName(file: TFile): string {
+		return file.path.replace(/\//g, '_-_');
+	}
+
+	getRemotePathKey(mangledName: string): string {
+		return `${this.settings.remoteBaseFolder}/${mangledName}`;
+	}
+
+	async getRemoteFileList(): Promise<Map<string, any> | null> {
+		const { apiKey, rootUrl, remoteBaseFolder } = this.settings;
+		try {
+			const response = await requestUrl({
+				url: `${rootUrl}/api/v1/documents/folder/${remoteBaseFolder}`,
+				method: 'GET',
+				headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+			});
+
+			if (response.status === 200) {
+				const fileMap = new Map<string, any>();
+				for (const doc of response.json.documents) {
+					const key = this.getRemotePathKey(doc.title);
+					fileMap.set(key, doc);
+				}
+				return fileMap;
+			}
+			// If the folder doesn't exist, the API returns a 404, which is expected.
+			// Return an empty map in this case.
+			return new Map<string, any>();
+		} catch (e) {
+			console.error('Error fetching remote file list:', e);
+			return null;
+		}
+	}
+
+	async getLocalFiles(syncedFolders: string[]): Promise<Map<string, any>> {
+		const localFiles = new Map<string, any>();
+		const allFiles = this.app.vault.getMarkdownFiles();
+
+		for (const file of allFiles) {
+			const isInSyncedFolder = syncedFolders.some(folder => 
+				folder === '.' || file.path.startsWith(folder + '/')
+			);
+
+			if (isInSyncedFolder) {
+				const mangledName = this.getMangledFileName(file);
+				const key = this.getRemotePathKey(mangledName);
+				localFiles.set(key, {
+					path: file.path,
+					mtime: file.stat.mtime
+				});
+			}
+		}
+		return localFiles;
+	}
+
+	compareFiles(localFiles: Map<string, any>, remoteFiles: Map<string, any>) {
+		const toCreate = new Set<string>();
+		const toUpdate = new Set<string>();
+
+		for (const [key, file] of localFiles.entries()) {
+			if (!remoteFiles.has(key)) {
+				toCreate.add(key);
+			} else {
+				const remoteFile = remoteFiles.get(key);
+				const remoteMtime = new Date(remoteFile.published).getTime();
+				if (file.mtime > remoteMtime) {
+					toUpdate.add(key);
+				}
+			}
+		}
+
+		const localKeys = new Set(localFiles.keys());
+		const toDelete = new Set<string>();
+		for (const key of remoteFiles.keys()) {
+			if (!localKeys.has(key)) {
+				toDelete.add(key);
+			}
+		}
+
+		return { toCreate, toUpdate, toDelete };
+	}
+
+	async ensureRemoteFolderExists(path: string): Promise<void> {
+		const { apiKey, rootUrl } = this.settings;
+		// This is simplified now - it doesn't need to be recursive.
+		try {
+			const response = await fetch(`${rootUrl}/api/v1/document/create-folder`, {
+				method: 'POST',
+				body: JSON.stringify({ name: path }),
+				headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
+			});
+			if (!response.ok) {
+				const data = await response.json();
+				if (data.error && !data.error.includes('already exists')) {
+					console.error(`Failed to create folder ${path}:`, data.error);
+				}
+			}
+		} catch (e: any) {
+			// Error is likely "already exists", which is fine.
+		}
 	}
 
 	onunload() {
@@ -264,8 +583,8 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 				}));
 		
 		new Setting(containerEl)
-			.setName('Auto-delete remote files')
-			.setDesc('If enabled, files deleted or updated in Obsidian will also be deleted from Anything LLM. If disabled, they will be moved to an archive folder.')
+			.setName('Permanently delete archived files')
+			.setDesc('If enabled, the remote trash and archive folders will be cleared after sync. If disabled, old files will be kept.')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.autoDelete)
 				.onChange(async (value) => {
@@ -273,5 +592,30 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
+		containerEl.createEl('h2', { text: 'Sync Behavior' });
+
+		new Setting(containerEl)
+			.setName('Remote Base Folder')
+			.setDesc('The root folder in Anything LLM to sync your vault to.')
+			.addText(text => text
+				.setPlaceholder('Obsidian Vault')
+				.setValue(this.plugin.settings.remoteBaseFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.remoteBaseFolder = value;
+					await this.plugin.saveSettings();
+				}));
+		
+		new Setting(containerEl)
+			.setName('When a synced file is updated...')
+			.setDesc('How to handle the old version of a file in Anything LLM when it is updated in Obsidian.')
+			.addDropdown(dropdown => dropdown
+				.addOption('keep-in-workspace', 'Keep both versions in workspace')
+				.addOption('archive', 'Replace version in workspace (archive old)')
+				.addOption('delete', 'Replace completely (destructive)')
+				.setValue(this.plugin.settings.updateHandling)
+				.onChange(async (value: 'keep-in-workspace' | 'archive' | 'delete') => {
+					this.plugin.settings.updateHandling = value;
+					await this.plugin.saveSettings();
+				}));
 	}
 }
