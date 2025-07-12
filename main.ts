@@ -103,6 +103,12 @@ export default class AnythingObsidian extends Plugin {
 		await this.processCreations(toCreate, localFiles);
 		await this.processUpdates(toUpdate, localFiles, remoteFiles);
 		await this.processDeletions(toDelete, remoteFiles);
+
+		// Final cleanup step
+		if (this.settings.autoDelete) {
+			new Notice('Auto-delete is enabled, clearing remote archives...');
+			await this.clearRemoteArchives();
+		}
 	}
 
 	async processCreations(toCreate: Set<string>, localFiles: Map<string, any>) {
@@ -267,10 +273,6 @@ export default class AnythingObsidian extends Plugin {
 		}
 	
 		await this.moveFilesToTrash(remotePathsToDelete);
-
-		if (this.settings.autoDelete) {
-			await this.clearRemoteArchives();
-		}
 	}
 
 	async removeDocumentsFromWorkspace(slug: string, documentPaths: string[]) {
