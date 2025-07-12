@@ -10,13 +10,17 @@ interface AnythingObsidianSettings {
 	rootUrl: string;
 	workspaces: Workspace[];
 	selectedWorkspaces: string[];
+	syncedFolders: string[];
+	autoDelete: boolean;
 }
 
 const DEFAULT_SETTINGS: AnythingObsidianSettings = {
 	apiKey: '',
 	rootUrl: 'http://localhost:3001',
 	workspaces: [],
-	selectedWorkspaces: []
+	selectedWorkspaces: [],
+	syncedFolders: [],
+	autoDelete: false
 }
 
 export default class AnythingObsidian extends Plugin {
@@ -27,6 +31,16 @@ export default class AnythingObsidian extends Plugin {
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new AnythingObsidianSettingTab(this.app, this));
+
+		this.addCommand({
+			id: 'sync-folders-to-anything-llm',
+			name: 'Sync folders to Anything LLM',
+			callback: async () => {
+				// Placeholder for the sync logic
+				new Notice('Sync process initiated...');
+				// We will implement the actual sync logic here in the next steps.
+			}
+		});
 
 		this.addCommand({
 			id: 'upload-active-file-to-anything-llm',
@@ -235,5 +249,29 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 						}));
 			});
 		}
+
+		containerEl.createEl('h2', { text: 'Folder Sync' });
+
+		new Setting(containerEl)
+			.setName('Folders to Sync')
+			.setDesc('Enter the paths of the folders you want to sync, one path per line, relative to your vault root. Use "." to sync the entire vault. For example: "Inbox" or "Projects/Active".')
+			.addTextArea(text => text
+				.setPlaceholder('.\nFolder1\nFolder2/Subfolder')
+				.setValue(this.plugin.settings.syncedFolders.join('\n'))
+				.onChange(async (value) => {
+					this.plugin.settings.syncedFolders = value.split('\n').map(path => path.trim()).filter(path => path.length > 0);
+					await this.plugin.saveSettings();
+				}));
+		
+		new Setting(containerEl)
+			.setName('Auto-delete remote files')
+			.setDesc('If enabled, files deleted or updated in Obsidian will also be deleted from Anything LLM. If disabled, they will be moved to an archive folder.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoDelete)
+				.onChange(async (value) => {
+					this.plugin.settings.autoDelete = value;
+					await this.plugin.saveSettings();
+				}));
+
 	}
 }
