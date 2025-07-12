@@ -1,81 +1,86 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+interface Workspace {
+	name: string;
+	slug: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+interface AnythingObsidianSettings {
+	apiKey: string;
+	rootUrl: string;
+	workspaces: Workspace[];
+	selectedWorkspaces: string[];
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+const DEFAULT_SETTINGS: AnythingObsidianSettings = {
+	apiKey: '',
+	rootUrl: 'http://localhost:3001',
+	workspaces: [],
+	selectedWorkspaces: []
+}
+
+export default class AnythingObsidian extends Plugin {
+	settings: AnythingObsidianSettings;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+		// This adds a settings tab so the user can configure various aspects of the plugin
+		this.addSettingTab(new AnythingObsidianSettingTab(this.app, this));
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+		this.addCommand({
+			id: 'upload-active-file-to-anything-llm',
+			name: 'Upload active file to Anything LLM',
+			editorCallback: async (editor: Editor, view: MarkdownView) => {
+				const { selectedWorkspaces, apiKey, rootUrl } = this.settings;
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+				if (!selectedWorkspaces || selectedWorkspaces.length === 0) {
+					new Notice('No workspace selected. Please select a workspace in the plugin settings.');
+					return;
+				}
+
+				if (!apiKey || !rootUrl) {
+					new Notice('API Key or Root URL is missing. Please configure them in the settings.');
+					return;
+				}
+				
+				const file = view.file;
+				if (!file) {
+					new Notice('No active file to upload.');
+					return;
+				}
+
+				const fileContent = await this.app.vault.read(file);
+				
+				const formData = new FormData();
+				formData.append('file', new Blob([fileContent], { type: 'text/markdown' }), file.name);
+				formData.append('addToWorkspaces', selectedWorkspaces.join(','));
+
+				new Notice(`Uploading ${file.name}...`);
+
+				try {
+					// We need to use fetch directly as requestUrl does not support FormData well.
+					const response = await fetch(`${rootUrl}/api/v1/document/upload`, {
+						method: 'POST',
+						body: formData,
+						headers: {
+							'Authorization': `Bearer ${apiKey}`,
+						}
+					});
+					
+					const responseData = await response.json();
+
+					if (responseData.success) {
+						new Notice(`${file.name} uploaded successfully to ${selectedWorkspaces.length} workspace(s).`);
+					} else {
+						new Notice(`Failed to upload ${file.name}. Error: ${responseData.error}`);
 					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+				} catch (e: any) {
+					new Notice(`Error uploading file: ${e.message}`);
+					console.error(e);
 				}
 			}
 		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
 	}
 
 	onunload() {
@@ -91,26 +96,10 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class AnythingObsidianSettingTab extends PluginSettingTab {
+	plugin: AnythingObsidian;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: AnythingObsidian) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -121,14 +110,130 @@ class SampleSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('Anything LLM API Key')
+			.setDesc('Enter your Anything LLM API Key')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('Enter your API Key')
+				.setValue(this.plugin.settings.apiKey)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.apiKey = value;
 					await this.plugin.saveSettings();
 				}));
+
+		new Setting(containerEl)
+			.setName('Anything LLM Root URL')
+			.setDesc('Enter your Anything LLM instance URL')
+			.addText(text => text
+				.setPlaceholder('http://localhost:3001')
+				.setValue(this.plugin.settings.rootUrl)
+				.onChange(async (value) => {
+					if (value.endsWith('/')) {
+						value = value.slice(0, -1);
+					}
+					this.plugin.settings.rootUrl = value;
+					await this.plugin.saveSettings();
+				}));
+		
+		new Setting(containerEl)
+			.setName('Test API Key')
+			.setDesc('Click to test your API key and connection to Anything LLM.')
+			.addButton(button => button
+				.setButtonText('Test Connection')
+				.onClick(async () => {
+					if (!this.plugin.settings.apiKey || !this.plugin.settings.rootUrl) {
+						new Notice('Please enter an API Key and Root URL first.');
+						return;
+					}
+
+					try {
+						const response = await requestUrl({
+							url: `${this.plugin.settings.rootUrl}/api/v1/auth`,
+							method: 'GET',
+							headers: {
+								'Accept': 'application/json',
+								'Authorization': `Bearer ${this.plugin.settings.apiKey}`
+							}
+						});
+
+						if (response.status === 200 && response.json.authenticated) {
+							new Notice('API Key is valid!');
+						} else {
+							new Notice('API Key is invalid or connection failed.');
+						}
+					} catch (e) {
+						new Notice('Error connecting to Anything LLM. Check the Root URL and your network connection.');
+						console.error(e);
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Discover Workspaces')
+			.setDesc('Click to fetch available workspaces from your Anything LLM instance.')
+			.addButton(button => button
+				.setButtonText('Discover')
+				.onClick(async () => {
+					if (!this.plugin.settings.apiKey || !this.plugin.settings.rootUrl) {
+						new Notice('Please enter an API Key and Root URL first.');
+						return;
+					}
+					try {
+						const response = await requestUrl({
+							url: `${this.plugin.settings.rootUrl}/api/v1/workspaces`,
+							method: 'GET',
+							headers: {
+								'Accept': 'application/json',
+								'Authorization': `Bearer ${this.plugin.settings.apiKey}`
+							}
+						});
+
+						if (response.status === 200) {
+							const data = response.json;
+							const newWorkspaces = data.workspaces.map((ws: { name: string, slug: string }) => ({
+								name: ws.name,
+								slug: ws.slug
+							}));
+							this.plugin.settings.workspaces = newWorkspaces;
+							
+							const newWorkspaceSlugs = new Set(newWorkspaces.map((ws: Workspace) => ws.slug));
+							this.plugin.settings.selectedWorkspaces = this.plugin.settings.selectedWorkspaces.filter(slug => newWorkspaceSlugs.has(slug));
+
+							await this.plugin.saveSettings();
+							new Notice(`${data.workspaces.length} workspaces found.`);
+							this.display(); // Rerender
+						} else {
+							new Notice('Failed to fetch workspaces.');
+						}
+					} catch (e) {
+						new Notice('Error fetching workspaces.');
+						console.error(e);
+					}
+				}));
+
+		if (this.plugin.settings.workspaces && this.plugin.settings.workspaces.length > 0) {
+			containerEl.createEl('h2', { text: 'Send To' });
+			containerEl.createEl('p', { text: 'Select the workspaces to send files to.' });
+
+			this.plugin.settings.workspaces.forEach((ws: Workspace) => {
+				new Setting(containerEl)
+					.setName(ws.name)
+					.addToggle(toggle => toggle
+						.setValue(this.plugin.settings.selectedWorkspaces.includes(ws.slug))
+						.onChange(async (value) => {
+							const { selectedWorkspaces } = this.plugin.settings;
+							if (value) {
+								if (!selectedWorkspaces.includes(ws.slug)) {
+									selectedWorkspaces.push(ws.slug);
+								}
+							} else {
+								const index = selectedWorkspaces.indexOf(ws.slug);
+								if (index > -1) {
+									selectedWorkspaces.splice(index, 1);
+								}
+							}
+							this.plugin.settings.selectedWorkspaces = selectedWorkspaces;
+							await this.plugin.saveSettings();
+						}));
+			});
+		}
 	}
 }
