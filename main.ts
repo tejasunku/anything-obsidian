@@ -27,6 +27,60 @@ export default class AnythingObsidian extends Plugin {
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new AnythingObsidianSettingTab(this.app, this));
+
+		this.addCommand({
+			id: 'upload-active-file-to-anything-llm',
+			name: 'Upload active file to Anything LLM',
+			editorCallback: async (editor: Editor, view: MarkdownView) => {
+				const { selectedWorkspaces, apiKey, rootUrl } = this.settings;
+
+				if (!selectedWorkspaces || selectedWorkspaces.length === 0) {
+					new Notice('No workspace selected. Please select a workspace in the plugin settings.');
+					return;
+				}
+
+				if (!apiKey || !rootUrl) {
+					new Notice('API Key or Root URL is missing. Please configure them in the settings.');
+					return;
+				}
+				
+				const file = view.file;
+				if (!file) {
+					new Notice('No active file to upload.');
+					return;
+				}
+
+				const fileContent = await this.app.vault.read(file);
+				
+				const formData = new FormData();
+				formData.append('file', new Blob([fileContent], { type: 'text/markdown' }), file.name);
+				formData.append('addToWorkspaces', selectedWorkspaces.join(','));
+
+				new Notice(`Uploading ${file.name}...`);
+
+				try {
+					// We need to use fetch directly as requestUrl does not support FormData well.
+					const response = await fetch(`${rootUrl}/api/v1/document/upload`, {
+						method: 'POST',
+						body: formData,
+						headers: {
+							'Authorization': `Bearer ${apiKey}`,
+						}
+					});
+					
+					const responseData = await response.json();
+
+					if (responseData.success) {
+						new Notice(`${file.name} uploaded successfully to ${selectedWorkspaces.length} workspace(s).`);
+					} else {
+						new Notice(`Failed to upload ${file.name}. Error: ${responseData.error}`);
+					}
+				} catch (e: any) {
+					new Notice(`Error uploading file: ${e.message}`);
+					console.error(e);
+				}
+			}
+		});
 	}
 
 	onunload() {
@@ -134,13 +188,13 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 
 						if (response.status === 200) {
 							const data = response.json;
-							const newWorkspaces = data.workspaces.map((ws: any) => ({
+							const newWorkspaces = data.workspaces.map((ws: { name: string, slug: string }) => ({
 								name: ws.name,
 								slug: ws.slug
 							}));
 							this.plugin.settings.workspaces = newWorkspaces;
 							
-							const newWorkspaceSlugs = new Set(newWorkspaces.map(ws => ws.slug));
+							const newWorkspaceSlugs = new Set(newWorkspaces.map((ws: Workspace) => ws.slug));
 							this.plugin.settings.selectedWorkspaces = this.plugin.settings.selectedWorkspaces.filter(slug => newWorkspaceSlugs.has(slug));
 
 							await this.plugin.saveSettings();
@@ -155,11 +209,11 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 					}
 				}));
 
-if (this.plugin.settings.workspaces && this.plugin.settings.workspaces.length > 0) {
+		if (this.plugin.settings.workspaces && this.plugin.settings.workspaces.length > 0) {
 			containerEl.createEl('h2', { text: 'Send To' });
 			containerEl.createEl('p', { text: 'Select the workspaces to send files to.' });
 
-			this.plugin.settings.workspaces.forEach(ws => {
+			this.plugin.settings.workspaces.forEach((ws: Workspace) => {
 				new Setting(containerEl)
 					.setName(ws.name)
 					.addToggle(toggle => toggle
