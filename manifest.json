@@ -1,6 +1,6 @@
 {
 	"id": "anything-llm-integration",
-	"name": "Anything LLM integration",
+	"name": "Anything LLM Integration",
 	"version": "1.0.3",
 	"minAppVersion": "0.15.0",
 	"description": "Sync files to Anything LLM.",
