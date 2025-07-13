@@ -14,6 +14,9 @@ interface AnythingObsidianSettings {
 	autoDelete: boolean;
 	updateHandling: 'keep-in-workspace' | 'archive' | 'delete';
 	remoteBaseFolder: string;
+	autoSync: boolean;
+	autoSyncInterval: number;
+	showNotifications: boolean;
 }
 
 const DEFAULT_SETTINGS: AnythingObsidianSettings = {
@@ -24,14 +27,19 @@ const DEFAULT_SETTINGS: AnythingObsidianSettings = {
 	syncedFolders: [],
 	autoDelete: false,
 	updateHandling: 'archive',
-	remoteBaseFolder: 'Obsidian Vault'
+	remoteBaseFolder: 'Obsidian Vault',
+	autoSync: false,
+	autoSyncInterval: 5,
+	showNotifications: true,
 }
 
 export default class AnythingObsidian extends Plugin {
 	settings: AnythingObsidianSettings;
+	autoSyncIntervalId: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
+		this.applyAutoSyncSettings();
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new AnythingObsidianSettingTab(this.app, this));
@@ -40,7 +48,7 @@ export default class AnythingObsidian extends Plugin {
 			id: 'sync-folders-to-anything-llm',
 			name: 'Sync folders to Anything LLM',
 			callback: async () => {
-				new Notice('Sync process initiated...');
+				this.notify('Sync process initiated...');
 				await this.syncFolders();
 			}
 		});
@@ -52,21 +60,21 @@ export default class AnythingObsidian extends Plugin {
 				const { selectedWorkspaces, apiKey, rootUrl } = this.settings;
 
 				if (!selectedWorkspaces || selectedWorkspaces.length === 0) {
-					new Notice('No workspace selected. Please select a workspace in the plugin settings.');
+					this.notify('No workspace selected. Please select a workspace in the plugin settings.');
 					return;
 				}
 
 				if (!apiKey || !rootUrl) {
-					new Notice('API Key or Root URL is missing. Please configure them in the settings.');
+					this.notify('API Key or Root URL is missing. Please configure them in the settings.');
 					return;
 				}
 
 				const file = view.file;
 				if (!file) {
-					new Notice('No active file to upload.');
+					this.notify('No active file to upload.');
 					return;
 				}
-				new Notice(`Uploading ${file.name}...`);
+				this.notify(`Uploading ${file.name}...`);
 				await this.uploadFile(file, selectedWorkspaces);
 			}
 		});
@@ -75,20 +83,20 @@ export default class AnythingObsidian extends Plugin {
 	async syncFolders() {
 		const { apiKey, rootUrl, syncedFolders, remoteBaseFolder } = this.settings;
 		if (!syncedFolders || syncedFolders.length === 0) {
-			new Notice('No folders configured for syncing.');
+			this.notify('No folders configured for syncing.');
 			return;
 		}
 
 		await this.ensureRemoteFolderExists(remoteBaseFolder);
 
-		new Notice('Fetching remote file list...');
+		this.notify('Fetching remote file list...');
 		const remoteFiles = await this.getRemoteFileList();
 		if (remoteFiles === null) {
-			new Notice('Failed to fetch remote files. Aborting sync.');
+			this.notify('Failed to fetch remote files. Aborting sync.');
 			return;
 		}
 
-		new Notice('Scanning local files...');
+		this.notify('Scanning local files...');
 		const localFiles = await this.getLocalFiles(syncedFolders);
 		
 		const { toCreate, toUpdate, toDelete } = this.compareFiles(localFiles, remoteFiles);
@@ -97,7 +105,7 @@ export default class AnythingObsidian extends Plugin {
 		console.log('Files to update:', toUpdate);
 		console.log('Files to delete:', toDelete);
 
-		new Notice('Sync comparison complete. Check console for details.');
+		this.notify('Sync comparison complete. Check console for details.');
 
 		// Now, perform the actual file operations
 		await this.processCreations(toCreate, localFiles);
@@ -106,7 +114,7 @@ export default class AnythingObsidian extends Plugin {
 
 		// Final cleanup step
 		if (this.settings.autoDelete) {
-			new Notice('Auto-delete is enabled, clearing remote archives...');
+			this.notify('Auto-delete is enabled, clearing remote archives...');
 			await this.clearRemoteArchives();
 		}
 	}
@@ -115,7 +123,7 @@ export default class AnythingObsidian extends Plugin {
 		for (const path of toCreate) {
 			const file = this.app.vault.getAbstractFileByPath(localFiles.get(path).path);
 			if (file instanceof TFile) {
-				new Notice(`Creating: ${file.name}`);
+				this.notify(`Creating: ${file.name}`);
 				await this.uploadFile(file, this.settings.selectedWorkspaces);
 			}
 		}
@@ -136,7 +144,7 @@ export default class AnythingObsidian extends Plugin {
 			remotePathsToModify.push(`${this.settings.remoteBaseFolder}/${remoteFile.name}`);
 		}
 		
-		new Notice(`Found ${filesToUpload.length} file(s) to update.`);
+		this.notify(`Found ${filesToUpload.length} file(s) to update.`);
 
 		// Always upload the new version first
 		for (const file of filesToUpload) {
@@ -146,7 +154,7 @@ export default class AnythingObsidian extends Plugin {
 		// Now, handle the old version based on the setting
 		if (updateHandling === 'keep-in-workspace') {
 			// Do nothing. The old file is kept and its embeddings remain.
-			new Notice('Kept old versions in workspace.');
+			this.notify('Kept old versions in workspace.');
 			return;
 		}
 
@@ -162,7 +170,7 @@ export default class AnythingObsidian extends Plugin {
 
 		if (updateHandling === 'delete') {
 			// Move the old files to the trash folder, which will be deleted if auto-delete is on
-			await this.moveFilesToTrash(remotePathsToModify);
+			await this.move_files_to_trash(remotePathsToModify);
 		}
 	}
 
@@ -187,7 +195,7 @@ export default class AnythingObsidian extends Plugin {
 			const responseData = await response.json();
 			if (!response.ok || !responseData.success) {
 				const errorMessage = responseData.error || `HTTP error! Status: ${response.status}`;
-				new Notice(`Failed to upload ${file.name}: ${errorMessage}`);
+				this.notify(`Failed to upload ${file.name}: ${errorMessage}`);
 				return; // Stop if upload failed
 			}
 
@@ -199,7 +207,7 @@ export default class AnythingObsidian extends Plugin {
 			}
 
 		} catch (e: any) {
-			new Notice(`Failed to upload ${file.name}.`);
+			this.notify(`Failed to upload ${file.name}.`);
 		}
 	}
 
@@ -219,7 +227,7 @@ export default class AnythingObsidian extends Plugin {
 			});
 		} catch (e: any) {
 			console.error(`Failed to add ${documentPath} to workspace ${slug}:`, e);
-			new Notice(`Failed to add document to workspace ${slug}.`);
+			this.notify(`Failed to add document to workspace ${slug}.`);
 		}
 	}
 
@@ -247,10 +255,10 @@ export default class AnythingObsidian extends Plugin {
 				body: JSON.stringify({ files: filesToMove }),
 				headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
 			});
-			new Notice(`Moved ${remotePaths.length} file(s) to the ${targetFolder} folder.`);
+			this.notify(`Moved ${remotePaths.length} file(s) to the ${targetFolder} folder.`);
 		} catch (e: any) {
 			console.error(`Error moving files to ${targetFolder}:`, e);
-			new Notice(`Failed to move files to ${targetFolder}.`);
+			this.notify(`Failed to move files to ${targetFolder}.`);
 		}
 	}
 	
@@ -267,12 +275,12 @@ export default class AnythingObsidian extends Plugin {
 			remotePathsToDelete.push(remotePath);
 		}
 		
-		new Notice(`Found ${remotePathsToDelete.length} file(s) to delete.`);
+		this.notify(`Found ${remotePathsToDelete.length} file(s) to delete.`);
 		for (const slug of this.settings.selectedWorkspaces) {
 			await this.removeDocumentsFromWorkspace(slug, remotePathsToDelete);
 		}
 	
-		await this.moveFilesToTrash(remotePathsToDelete);
+		await this.move_files_to_trash(remotePathsToDelete);
 	}
 
 	async removeDocumentsFromWorkspace(slug: string, documentPaths: string[]) {
@@ -292,7 +300,7 @@ export default class AnythingObsidian extends Plugin {
 			});
 		} catch (e: any) {
 			console.error(`Failed to remove documents from workspace ${slug}:`, e);
-			new Notice(`Failed to remove documents from workspace ${slug}.`);
+			this.notify(`Failed to remove documents from workspace ${slug}.`);
 		}
 	}
 
@@ -306,7 +314,7 @@ export default class AnythingObsidian extends Plugin {
 					body: JSON.stringify({ name: folderName }),
 					headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }
 				});
-				new Notice(`Cleared the ${folderName} folder.`);
+				this.notify(`Cleared the ${folderName} folder.`);
 			} catch (e: any) {
 				// It's okay if the folder doesn't exist, so we only log other errors.
 				if (e.message && !e.message.includes('404')) {
@@ -428,6 +436,29 @@ export default class AnythingObsidian extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.applyAutoSyncSettings();
+	}
+
+	applyAutoSyncSettings() {
+		if (this.autoSyncIntervalId) {
+			window.clearInterval(this.autoSyncIntervalId);
+			this.autoSyncIntervalId = null;
+		}
+
+		if (this.settings.autoSync) {
+			this.autoSyncIntervalId = this.registerInterval(
+				window.setInterval(() => {
+					this.notify('Auto-syncing files...');
+					this.syncFolders();
+				}, this.settings.autoSyncInterval * 60 * 1000)
+			);
+		}
+	}
+
+	notify(message: string) {
+		if (this.settings.showNotifications) {
+			new Notice(message);
+		}
 	}
 }
 
@@ -443,6 +474,20 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 		const {containerEl} = this;
 
 		containerEl.empty();
+
+		containerEl.createEl('h2', { text: 'General' });
+
+		new Setting(containerEl)
+			.setName('Show notifications')
+			.setDesc('Enable or disable notifications for sync status and other operations.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.showNotifications)
+				.onChange(async (value) => {
+					this.plugin.settings.showNotifications = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h2', { text: 'Connection' });
 
 		new Setting(containerEl)
 			.setName('Anything LLM API Key')
@@ -476,7 +521,7 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 				.setButtonText('Test Connection')
 				.onClick(async () => {
 					if (!this.plugin.settings.apiKey || !this.plugin.settings.rootUrl) {
-						new Notice('Please enter an API Key and Root URL first.');
+						this.plugin.notify('Please enter an API Key and Root URL first.');
 						return;
 					}
 
@@ -491,12 +536,12 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 						});
 
 						if (response.status === 200 && response.json.authenticated) {
-							new Notice('API Key is valid!');
+							this.plugin.notify('API Key is valid!');
 						} else {
-							new Notice('API Key is invalid or connection failed.');
+							this.plugin.notify('API Key is invalid or connection failed.');
 						}
 					} catch (e) {
-						new Notice('Error connecting to Anything LLM. Check the Root URL and your network connection.');
+						this.plugin.notify('Error connecting to Anything LLM. Check the Root URL and your network connection.');
 						console.error(e);
 					}
 				}));
@@ -508,7 +553,7 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 				.setButtonText('Discover')
 				.onClick(async () => {
 					if (!this.plugin.settings.apiKey || !this.plugin.settings.rootUrl) {
-						new Notice('Please enter an API Key and Root URL first.');
+						this.plugin.notify('Please enter an API Key and Root URL first.');
 						return;
 					}
 					try {
@@ -533,13 +578,13 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 							this.plugin.settings.selectedWorkspaces = this.plugin.settings.selectedWorkspaces.filter(slug => newWorkspaceSlugs.has(slug));
 
 							await this.plugin.saveSettings();
-							new Notice(`${data.workspaces.length} workspaces found.`);
+							this.plugin.notify(`${data.workspaces.length} workspaces found.`);
 							this.display(); // Rerender
 						} else {
-							new Notice('Failed to fetch workspaces.');
+							this.plugin.notify('Failed to fetch workspaces.');
 						}
 					} catch (e) {
-						new Notice('Error fetching workspaces.');
+						this.plugin.notify('Error fetching workspaces.');
 						console.error(e);
 					}
 				}));
@@ -619,5 +664,34 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 					this.plugin.settings.updateHandling = value;
 					await this.plugin.saveSettings();
 				}));
+		
+		containerEl.createEl('h2', { text: 'Auto Sync' });
+
+		new Setting(containerEl)
+			.setName('Enable Auto Sync')
+			.setDesc('Automatically sync your specified folders in the background.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoSync)
+				.onChange(async (value) => {
+					this.plugin.settings.autoSync = value;
+					await this.plugin.saveSettings();
+					this.display(); // Rerender to show/hide interval setting
+				}));
+		
+		if (this.plugin.settings.autoSync) {
+			new Setting(containerEl)
+				.setName('Sync Interval (minutes)')
+				.setDesc('How often to automatically sync your files.')
+				.addText(text => text
+					.setPlaceholder('5')
+					.setValue(String(this.plugin.settings.autoSyncInterval))
+					.onChange(async (value) => {
+						const interval = parseInt(value, 10);
+						if (!isNaN(interval) && interval > 0) {
+							this.plugin.settings.autoSyncInterval = interval;
+							await this.plugin.saveSettings();
+						}
+					}));
+		}
 	}
 }
