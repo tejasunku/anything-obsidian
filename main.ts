@@ -16,6 +16,7 @@ interface AnythingObsidianSettings {
 	remoteBaseFolder: string;
 	autoSync: boolean;
 	autoSyncInterval: number;
+	showNotifications: boolean;
 }
 
 const DEFAULT_SETTINGS: AnythingObsidianSettings = {
@@ -29,6 +30,7 @@ const DEFAULT_SETTINGS: AnythingObsidianSettings = {
 	remoteBaseFolder: 'Obsidian Vault',
 	autoSync: false,
 	autoSyncInterval: 5,
+	showNotifications: true,
 }
 
 export default class AnythingObsidian extends Plugin {
@@ -466,6 +468,20 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 		const {containerEl} = this;
 
 		containerEl.empty();
+
+		containerEl.createEl('h2', { text: 'General' });
+
+		new Setting(containerEl)
+			.setName('Show notifications')
+			.setDesc('Enable or disable notifications for sync status and other operations.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.showNotifications)
+				.onChange(async (value) => {
+					this.plugin.settings.showNotifications = value;
+					await this.plugin.saveSettings();
+				}));
+
+		containerEl.createEl('h2', { text: 'Connection' });
 
 		new Setting(containerEl)
 			.setName('Anything LLM API Key')
