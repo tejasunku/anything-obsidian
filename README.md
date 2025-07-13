@@ -2,6 +2,10 @@
 
 This plugin syncs files from your Obsidian vault to your Anything LLM instance.
 
+## About Anything LLM
+
+Anything LLM is an excellent local LLM chatbot and knowledge base tool. Information about it can be found here: https://anythingllm.com/
+
 ## Configuration
 
 To use this plugin, you need to configure it with an API token and the root URL of your Anything LLM instance.
@@ -29,3 +33,7 @@ To use this plugin, you need to configure it with an API token and the root URL 
 ## Manually installing the plugin
 
 - Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
+
+
+# Acknowledgments
+Thanks is given to the Anything LLM team and the Obsidian team for their products. No claim is made upon their property.
