@@ -14,6 +14,8 @@ interface AnythingObsidianSettings {
 	autoDelete: boolean;
 	updateHandling: 'keep-in-workspace' | 'archive' | 'delete';
 	remoteBaseFolder: string;
+	autoSync: boolean;
+	autoSyncInterval: number;
 }
 
 const DEFAULT_SETTINGS: AnythingObsidianSettings = {
@@ -24,14 +26,18 @@ const DEFAULT_SETTINGS: AnythingObsidianSettings = {
 	syncedFolders: [],
 	autoDelete: false,
 	updateHandling: 'archive',
-	remoteBaseFolder: 'Obsidian Vault'
+	remoteBaseFolder: 'Obsidian Vault',
+	autoSync: false,
+	autoSyncInterval: 5,
 }
 
 export default class AnythingObsidian extends Plugin {
 	settings: AnythingObsidianSettings;
+	autoSyncIntervalId: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
+		this.applyAutoSyncSettings();
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new AnythingObsidianSettingTab(this.app, this));
@@ -428,6 +434,23 @@ export default class AnythingObsidian extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.applyAutoSyncSettings();
+	}
+
+	applyAutoSyncSettings() {
+		if (this.autoSyncIntervalId) {
+			window.clearInterval(this.autoSyncIntervalId);
+			this.autoSyncIntervalId = null;
+		}
+
+		if (this.settings.autoSync) {
+			this.autoSyncIntervalId = this.registerInterval(
+				window.setInterval(() => {
+					new Notice('Auto-syncing files...');
+					this.syncFolders();
+				}, this.settings.autoSyncInterval * 60 * 1000)
+			);
+		}
 	}
 }
 
@@ -619,5 +642,34 @@ class AnythingObsidianSettingTab extends PluginSettingTab {
 					this.plugin.settings.updateHandling = value;
 					await this.plugin.saveSettings();
 				}));
+		
+		containerEl.createEl('h2', { text: 'Auto Sync' });
+
+		new Setting(containerEl)
+			.setName('Enable Auto Sync')
+			.setDesc('Automatically sync your specified folders in the background.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.autoSync)
+				.onChange(async (value) => {
+					this.plugin.settings.autoSync = value;
+					await this.plugin.saveSettings();
+					this.display(); // Rerender to show/hide interval setting
+				}));
+		
+		if (this.plugin.settings.autoSync) {
+			new Setting(containerEl)
+				.setName('Sync Interval (minutes)')
+				.setDesc('How often to automatically sync your files.')
+				.addText(text => text
+					.setPlaceholder('5')
+					.setValue(String(this.plugin.settings.autoSyncInterval))
+					.onChange(async (value) => {
+						const interval = parseInt(value, 10);
+						if (!isNaN(interval) && interval > 0) {
+							this.plugin.settings.autoSyncInterval = interval;
+							await this.plugin.saveSettings();
+						}
+					}));
+		}
 	}
 }
