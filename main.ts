@@ -170,7 +170,7 @@ export default class AnythingObsidian extends Plugin {
 
 		if (updateHandling === 'delete') {
 			// Move the old files to the trash folder, which will be deleted if auto-delete is on
-			await this.move_files_to_trash(remotePathsToModify);
+			await this.moveFilesToTrash(remotePathsToModify);
 		}
 	}
 
@@ -280,7 +280,7 @@ export default class AnythingObsidian extends Plugin {
 			await this.removeDocumentsFromWorkspace(slug, remotePathsToDelete);
 		}
 	
-		await this.move_files_to_trash(remotePathsToDelete);
+		await this.moveFilesToTrash(remotePathsToDelete);
 	}
 
 	async removeDocumentsFromWorkspace(slug: string, documentPaths: string[]) {
